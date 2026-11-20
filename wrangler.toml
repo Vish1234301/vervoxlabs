@@ -2,10 +2,5 @@ name = "vervoxlabs-notifications"
 main = "worker/index.js"
 compatibility_date = "2026-11-19"
 
-[[d1_databases]]
-binding = "DB"
-database_name = "vervoxlabs-notifications"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
-
 [vars]
 EMAIL_FROM = "VervoxLabs <orders@YOUR_VERIFIED_DOMAIN>"
