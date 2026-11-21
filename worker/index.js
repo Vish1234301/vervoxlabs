@@ -17,7 +17,7 @@ const PRODUCTS = new Map([
 const CARD_PRICE_CENTS = 50;
 
 function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
+  return new Response(status === 204 ? null : JSON.stringify(data), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
@@ -190,8 +190,9 @@ async function createCheckout(request, env) {
     mode: "payment",
     customer_email: email,
     client_reference_id: orderNumber,
-    success_url: `${SITE_URL}?checkout=success`,
-    cancel_url: `${SITE_URL}?checkout=cancel`,
+    success_url: `${env.STOREFRONT_URL || SITE_URL}?checkout=success`,
+    cancel_url: `${env.STOREFRONT_URL || SITE_URL}?checkout=cancel`,
+    "metadata[store]": "vervoxlabs",
     "metadata[order_number]": orderNumber,
     "metadata[customer_name]": name,
     "metadata[shipping_address]": shipping.address,
@@ -279,6 +280,7 @@ async function handleStripe(request, env) {
 
   const session = event.data?.object;
   if (!session?.id || session.payment_status !== "paid") return json({ received: true, ignored: true });
+  if (session.metadata?.store !== "vervoxlabs" && !(session.metadata?.order_number?.startsWith("VV-") && session.metadata?.shipping_address)) return json({ received: true, ignored: true });
   let lineItems;
   try { lineItems = await fetchStripeLineItems(env, session.id); }
   catch { return json({ error: "Could not verify purchased Stripe line items; retry event" }, 503); }
