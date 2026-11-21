@@ -1,16 +1,32 @@
 const ADMIN_EMAIL = "vishaagpartha@gmail.com";
 const RESEND_URL = "https://api.resend.com/emails";
 const STRIPE_API = "https://api.stripe.com/v1";
+const SITE_URL = "https://vish1234301.github.io/vervoxlabs/";
+const SITE_ORIGIN = "https://vish1234301.github.io";
 const SIGNATURE_TOLERANCE_SECONDS = 300;
 const encoder = new TextEncoder();
 const ZERO_DECIMAL_CURRENCIES = new Set([
   "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
 ]);
+const PRODUCTS = new Map([
+  ["ractors", "Ractors"],
+  ["snakow", "Snakow"],
+  ["jellsun", "Jellsun"],
+  ["fatue", "Fatue"],
+]);
+const CARD_PRICE_CENTS = 50;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": SITE_ORIGIN,
+      "access-control-allow-methods": "POST, OPTIONS",
+      "access-control-allow-headers": "Content-Type",
+      "vary": "Origin",
+    },
   });
 }
 
@@ -142,6 +158,77 @@ async function deliverOnce(env, eventKey, eventType, subject, text) {
   }
 }
 
+async function createCheckout(request, env) {
+  if (!env.STRIPE_SECRET_KEY) return json({ error: "Checkout is not configured yet." }, 503);
+  let order;
+  try { order = await request.json(); } catch { return json({ error: "Invalid order." }, 400); }
+  if (!order || typeof order !== "object" || !Array.isArray(order.items) || order.items.length < 1 || order.items.length > PRODUCTS.size) {
+    return json({ error: "Your cart is empty or invalid." }, 400);
+  }
+  const email = typeof order.email === "string" ? order.email.trim() : "";
+  const name = typeof order.name === "string" ? order.name.trim() : "";
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 || !name || name.length > 200) {
+    return json({ error: "Enter a valid name and email address." }, 400);
+  }
+  const addressFields = ["address", "city", "region", "postal", "country"];
+  const shipping = {};
+  for (const field of addressFields) {
+    const value = typeof order[field] === "string" ? order[field].trim() : "";
+    if (!value || value.length > 200) return json({ error: "Complete all shipping address fields." }, 400);
+    shipping[field] = value;
+  }
+  const quantities = new Map();
+  for (const item of order.items) {
+    if (!item || !PRODUCTS.has(item.id) || !Number.isInteger(item.quantity) || item.quantity < 1 || item.quantity > 20 || quantities.has(item.id)) {
+      return json({ error: "One or more cart items are invalid." }, 400);
+    }
+    quantities.set(item.id, item.quantity);
+  }
+
+  const orderNumber = `VV-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
+  const params = new URLSearchParams({
+    mode: "payment",
+    customer_email: email,
+    client_reference_id: orderNumber,
+    success_url: `${SITE_URL}?checkout=success`,
+    cancel_url: `${SITE_URL}?checkout=cancel`,
+    "metadata[order_number]": orderNumber,
+    "metadata[customer_name]": name,
+    "metadata[shipping_address]": shipping.address,
+    "metadata[shipping_city]": shipping.city,
+    "metadata[shipping_region]": shipping.region,
+    "metadata[shipping_postal]": shipping.postal,
+    "metadata[shipping_country]": shipping.country,
+  });
+  let index = 0;
+  for (const [id, quantity] of quantities) {
+    params.set(`line_items[${index}][quantity]`, String(quantity));
+    params.set(`line_items[${index}][price_data][currency]`, "usd");
+    params.set(`line_items[${index}][price_data][unit_amount]`, String(CARD_PRICE_CENTS));
+    params.set(`line_items[${index}][price_data][product_data][name]`, `VerVox ${PRODUCTS.get(id)} character card`);
+    index++;
+  }
+  let response;
+  try {
+    response = await fetch(`${STRIPE_API}/checkout/sessions`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+        "content-type": "application/x-www-form-urlencoded",
+        "Idempotency-Key": `checkout-${orderNumber}`,
+      },
+      body: params,
+    });
+  } catch {
+    return json({ error: "Could not reach Stripe. Please try again." }, 502);
+  }
+  const session = await response.json().catch(() => ({}));
+  if (!response.ok || typeof session.url !== "string") {
+    return json({ error: "Stripe could not start checkout. Please try again." }, 502);
+  }
+  return json({ url: session.url });
+}
+
 async function fetchStripeLineItems(env, sessionId) {
   if (!env.STRIPE_SECRET_KEY) throw new Error("Stripe API is not configured");
   const items = [];
@@ -199,12 +286,21 @@ async function handleStripe(request, env) {
   const customerEmail = session.customer_details?.email || session.customer_email || "Not provided";
   const paidAt = formatDateTime(Number.isInteger(event.created) ? event.created * 1000 : Date.now());
   const orderNumber = String(session.metadata?.order_number || session.client_reference_id || session.id).slice(0, 200);
+  const shippingLines = [
+    ["Customer", session.metadata?.customer_name],
+    ["Shipping address", session.metadata?.shipping_address],
+    ["City", session.metadata?.shipping_city],
+    ["State / region", session.metadata?.shipping_region],
+    ["Postal code", session.metadata?.shipping_postal],
+    ["Country", session.metadata?.shipping_country],
+  ].filter(([, value]) => value).map(([label, value]) => `${label}: ${value}`);
   const currency = (session.currency || "usd").toUpperCase();
   const subject = `Paid VerVoxLabs order ${orderNumber}`;
   const text = [
     "A Stripe-signature-verified payment was completed.",
     `Order number: ${orderNumber}`,
     `Customer email: ${customerEmail}`,
+    ...shippingLines,
     `Date and time (UTC): ${paidAt}`,
     "Purchased cards:",
     formatOrderItems(lineItems),
@@ -246,7 +342,9 @@ async function handleRegistration(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (request.method === "OPTIONS") return json({}, 204);
     if (request.method === "GET" && url.pathname === "/health") return json({ status: "ok" });
+    if (request.method === "POST" && url.pathname === "/checkout") return createCheckout(request, env);
     if (request.method !== "POST") return json({ error: "Method not allowed" }, 405);
     if (url.pathname === "/webhooks/stripe") return handleStripe(request, env);
     if (url.pathname === "/webhooks/registration") return handleRegistration(request, env);

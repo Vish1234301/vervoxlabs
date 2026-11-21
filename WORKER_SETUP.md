@@ -1,29 +1,31 @@
-# VerVoxLabs Cloudflare Worker + Supabase + Resend
+# VerVoxLabs Cloudflare Worker + Supabase + Resend + Stripe Checkout
 
-The Worker uses the existing Supabase project for notification-event tracking and Resend for administrator email notifications. It has no Cloudflare D1 binding or database dependency. This update does not modify the existing `cards`, `profiles`, `orders`, or `order_items` tables. The Worker service-role key and provider credentials must be configured as Cloudflare Worker secrets; none belong in this repository or frontend.
+The Cloudflare Worker provides Stripe Checkout creation and paid-order email notifications. Resend sends order notifications to `vishaagpartha@gmail.com`. Supabase is used only for idempotent notification tracking. The Stripe secret, Resend key, webhook signing secret, and Supabase service-role key must be Cloudflare Worker secrets; never put them in website HTML or GitHub.
 
-Email is **not confirmed working** until deployment secrets, a verified sender, Stripe configuration, the registration backend, and end-to-end tests are complete.
+Email is **not active until the Worker is deployed and all provider configuration and test steps below are complete**. The GitHub Pages storefront and Worker are separate services.
 
-## Worker endpoints
+## Routes
 
-- `POST /webhooks/stripe`: verifies Stripe's webhook signature, checks the Checkout Session is paid, retrieves purchased line items from Stripe using the server-side `STRIPE_SECRET_KEY`, then emails the order number, customer email, UTC date/time, card descriptions, quantities, unit prices, and total.
-- `POST /webhooks/registration`: verifies a timestamped HMAC-signed event from the trusted signup backend and sends the customer email and signup date/time.
-- Both routes use Supabase RPCs `claim_notification_event`, `complete_notification_event`, and `release_notification_event`. Stripe notifications are keyed by Checkout Session ID; Resend receives a stable idempotency key. This limits duplicate notifications on retries, although no distributed system can promise absolute exactly-once delivery if provider outcomes are ambiguous.
+- `POST /checkout`: validates the cart against the server-side VerVox catalog and creates a Stripe Checkout Session. Prices are fixed server-side at **$0.50 per card**; browser-submitted prices are never trusted. Customer shipping data and order number are attached to Checkout Session metadata.
+- `POST /webhooks/stripe`: verifies Stripe's webhook signature, checks the session is paid, retrieves line items from Stripe, and emails the order number, customer, shipping address, purchased cards, quantities, prices, total, and UTC payment time.
+- `GET /health`: deployment health check.
+- `POST /webhooks/registration`: existing signed registration notification endpoint.
 
-The current static storefront does not implement Stripe Checkout or customer signup. Configure the actual payment and signup services to call these webhook paths. The Worker does not currently use the existing store tables for inventory/accounts/orders; it is connected to Supabase only for notification tracking. The Stripe Checkout integration must provide order number in `metadata.order_number` or `client_reference_id`; otherwise the Checkout Session ID is used as the order number.
+Paid-order notifications use Supabase RPCs `claim_notification_event`, `complete_notification_event`, and `release_notification_event`, keyed by Checkout Session ID, to suppress duplicate emails on webhook retries.
 
-## Deployment — follow in order
+## Deployment — complete these steps
 
-1. **Verify Supabase setup.** The `notification_events` table and the three RPC functions must exist in the existing project. No D1 database is needed. The Worker sends RPC requests with the service-role key.
-2. **Connect Workers Builds.** In Cloudflare, connect `Vish1234301/vervoxlabs` under Workers & Pages → Create → Connect to Git. Choose branch `main`, root directory `/`, and deploy command `npx wrangler@4 deploy`.
-3. **Set the Supabase project URL.** In the Worker's production variables, set `SUPABASE_URL` to your project URL, such as `https://<project-ref>.supabase.co`.
-4. **Add the Supabase service-role key as a secret.** Name it `SUPABASE_SERVICE_ROLE_KEY`. Never add it to GitHub, `wrangler.toml`, website HTML, browser JavaScript, or public build variables.
-5. **Add email and webhook secrets.** Add `RESEND_API_KEY`, `STRIPE_WEBHOOK_SECRET`, and `REGISTRATION_WEBHOOK_SECRET` as Worker secrets. Set `EMAIL_FROM` as a Worker variable to an address on a domain verified with Resend.
-6. **Add the Stripe API secret.** Set `STRIPE_SECRET_KEY` as a Worker secret. It is used only server-side to retrieve the verified paid Checkout Session's line items from Stripe.
-7. **Configure Stripe webhooks.** Point Stripe at `https://<worker-domain>/webhooks/stripe`; subscribe to `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Store that endpoint's signing secret in `STRIPE_WEBHOOK_SECRET`. Make the Checkout Session server-side, set its real price, and include `metadata.order_number` or `client_reference_id`.
-8. **Connect successful registrations.** Have the trusted auth/signup backend POST `type`, unique `event_id`, `email`, optional `name`, and `created_at` (ISO timestamp) to `/webhooks/registration` only after account creation succeeds. Sign the exact raw JSON body with HMAC-SHA256 using `REGISTRATION_WEBHOOK_SECRET`; pass `X-Registration-Timestamp` (Unix seconds) and `X-Registration-Signature: sha256=<hex of HMAC(timestamp + '.' + raw body)>`. Do not sign or send this from frontend code.
-9. **Deploy and test.** Check `/health`, then use Stripe test mode and a test signup to verify mail, content, retry behavior, and duplicate suppression. Repeat webhook deliveries and simulate a Resend failure. A successful health response alone does not verify email.
+1. **Verify Supabase setup.** The existing Supabase project must have the `notification_events` table and the RPC functions `claim_notification_event`, `complete_notification_event`, and `release_notification_event`. The Worker uses the service-role key only server-side.
+2. **Deploy the Worker.** In Cloudflare Workers & Pages, connect `Vish1234301/vervoxlabs`, branch `main`, root directory `/`, and deploy with `npx wrangler deploy` (or use the Cloudflare dashboard's Workers Builds configuration). The Worker name in `wrangler.toml` is `vervoxlabs`.
+3. **Configure Worker secrets/variables.** Add `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY` as Worker secrets. Set `SUPABASE_URL` to the Supabase project URL. Set `EMAIL_FROM` to a sender address on a domain verified with Resend; replace the example in `wrangler.toml` if deploying that variable from the file. Never commit secret values.
+4. **Set the checkout API URL in the storefront.** In `index.html`, replace `YOUR_CLOUDFLARE_SUBDOMAIN` in `CHECKOUT_API` with the actual Cloudflare `workers.dev` subdomain or custom Worker domain. For example, `https://vervoxlabs.example.workers.dev/checkout`. Commit and let GitHub Pages deploy the updated site. The Worker allows browser requests from `https://vish1234301.github.io`.
+5. **Configure Stripe webhook.** In Stripe's Developers → Webhooks, add `https://<your-worker-domain>/webhooks/stripe` and subscribe to `checkout.session.completed` and `checkout.session.async_payment_succeeded`. Copy that endpoint's signing secret to the Worker secret `STRIPE_WEBHOOK_SECRET`. Use `STRIPE_SECRET_KEY` from the same Stripe mode (test or live).
+6. **Enable Resend delivery.** Verify the sender domain in Resend, set `EMAIL_FROM` to its verified sender, and configure `RESEND_API_KEY`. Notifications currently go to `vishaagpartha@gmail.com`; change `ADMIN_EMAIL` in `worker/index.js` if notifications should go elsewhere, then redeploy.
+7. **Test before going live.** Visit `https://<your-worker-domain>/health`, use Stripe test-mode keys and a test payment, and confirm the email includes order and shipping details. Confirm the Stripe webhook succeeds and repeat delivery to verify duplicate suppression. Switch both Stripe secret and webhook endpoint to live mode only after testing.
 
-## Secret entry
+## Important limitations
 
-Use Cloudflare Dashboard → Worker → Settings → Variables and Secrets, or run `npx wrangler secret put SECRET_NAME` for each secret. Enter secret values interactively, never as command-line literals, source code, or repository files. Store all production values in the production Worker environment; configure preview secrets separately if preview deployments need them.
+- The storefront's displayed stock is only browser-local demo data. It is not shared inventory and does not reserve stock. Do not rely on it to prevent overselling.
+- Checkout charges $0.50 per card and currently adds no shipping fee or tax. Configure Stripe tax and shipping charges if needed before live sales.
+- Customer address is collected by this storefront and stored in Stripe Checkout Session metadata so it can be included in the paid-order email. Restrict access to Stripe and email data appropriately.
+- No provider credentials are included in this repository. A successful code commit does not itself deploy services or prove email delivery.
