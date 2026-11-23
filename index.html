@@ -56,7 +56,9 @@
       const orderItems = items.map(item => ({ ...item }));
       data.Items = orderItems.map(item => item.qty + ' × ' + item.name).join('\n');
       data['Item total'] = money(orderItems.reduce((sum, item) => sum + item.qty * pricePerCard, 0));
-      data._subject = 'VervoxLabs unpaid order request';
+      data['Order reference'] = crypto.randomUUID();
+      data._url = 'https://vish1234301.github.io/vervoxlabs/';
+      data._subject = 'VervoxLabs unpaid order request ' + data['Order reference'];
       try {
         const response = await fetch('https://formsubmit.co/ajax/vishaagpartha@gmail.com', {
           method: 'POST',
